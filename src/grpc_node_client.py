@@ -1,0 +1,229 @@
+import base64
+import sys
+from typing import Any, Dict, List, Optional
+
+import aiohttp
+import structlog
+
+sys.path.insert(0, "src/grpc_stubs")
+import grpc
+import DeployServiceV1_pb2_grpc as svc
+import DeployServiceCommon_pb2 as common
+from google.protobuf import empty_pb2
+from google.protobuf.descriptor import FieldDescriptor
+
+from src.config import settings
+
+logger = structlog.get_logger(__name__)
+
+# Casper needs strictly more than 2/3 of the bonded stake to stay safe; below 1/3 it cannot progress
+BFT_SUPERMAJORITY = 2 / 3
+BFT_MINORITY = 1 / 3
+
+
+def _unwrap(response, field_name: str):
+    which = response.WhichOneof("message")
+    if which == "error":
+        raise grpc.RpcError(str(response.error))
+    return getattr(response, field_name)
+
+
+def _field_value(field, value):
+    if field.type == FieldDescriptor.TYPE_MESSAGE:
+        return _to_dict(value)
+    if field.type == FieldDescriptor.TYPE_BYTES:
+        return base64.b64encode(value).decode()
+    return value
+
+
+def _to_dict(message) -> Dict[str, Any]:
+    # Not MessageToDict: it renders int64 as strings and only unquotes below 2^53,
+    # so genesis deploys (phloLimit=2^63-1) would break the BIGINT insert.
+    result = {}
+    for field in message.DESCRIPTOR.fields:
+        value = getattr(message, field.name)
+        if field.is_repeated:
+            result[field.json_name] = [_field_value(field, item) for item in value]
+        else:
+            result[field.json_name] = _field_value(field, value)
+    return result
+
+
+class GrpcNodeClient:
+    def __init__(self, node_host: str = None, grpc_port: int = None, http_port: int = None):
+        self.node_host = node_host or settings.node_host or "localhost"
+        self.grpc_port = grpc_port or settings.grpc_port or 40452
+        self.http_port = http_port or settings.http_port or 40453
+
+        self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
+        self.stub = svc.DeployServiceStub(self.channel)
+
+    async def get_blocks_by_height(self, start: int, end: int) -> List[Dict[str, Any]]:
+        try:
+            query = common.BlocksQueryByHeight(startBlockNumber=start, endBlockNumber=end)
+
+            blocks = []
+            async for response in self.stub.getBlocksByHeights(query):
+                blocks.append(_to_dict(_unwrap(response, "blockInfo")))
+
+            return blocks
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to get blocks by height {start}-{end}: {e}")
+            return []
+
+    async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
+        try:
+            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery())
+            wrapper = _unwrap(response, "blockInfo")
+            return _to_dict(wrapper.blockInfo)
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to get last finalized block: {e}")
+            return None
+
+    async def get_bonds(self) -> Optional[Dict[str, Any]]:
+        try:
+            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery())
+            wrapper = _unwrap(response, "blockInfo")
+            return {"bonds": _to_dict(wrapper.blockInfo).get("bonds", [])}
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to get bonds: {e}")
+            return None
+
+    async def get_active_validators(self) -> Optional[List[Dict[str, Any]]]:
+        # activeValidators is PoS contract state, no gRPC RPC exposes it
+        url = f"http://{self.node_host}:{self.http_port}/api/validators"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+
+            return [
+                {"validator": v["publicKey"], "stake": v["stake"]}
+                for v in data.get("validators", [])
+            ]
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Failed to get active validators: {e}")
+            return None
+
+    async def get_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            query = common.BlockQuery(hash=block_hash)
+            response = await self.stub.getBlock(query)
+            return _to_dict(_unwrap(response, "blockInfo"))
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to get block details for {block_hash}: {e}")
+            return None
+
+    async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))
+            find_response = await self.stub.findDeploy(query)
+            light_block = _unwrap(find_response, "blockInfo")
+
+            block_response = await self.stub.getBlock(common.BlockQuery(hash=light_block.blockHash))
+            full_block = _unwrap(block_response, "blockInfo")
+
+            for deploy in full_block.deploys:
+                if deploy.sig == deploy_id:
+                    return {
+                        "deployId": deploy_id,
+                        "blockHash": light_block.blockHash,
+                        "blockNumber": light_block.blockNumber,
+                        "status": "included",
+                        **_to_dict(deploy),
+                    }
+
+            logger.warning(f"Deploy {deploy_id} not found in resolved block {light_block.blockHash}")
+            return None
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to get deploy info for {deploy_id}: {e}")
+            return None
+
+    async def show_main_chain(self, depth: int = 10) -> Optional[List[Dict[str, Any]]]:
+        try:
+            query = common.BlocksQuery(depth=depth)
+            main_chain_blocks = []
+            async for response in self.stub.showMainChain(query):
+                main_chain_blocks.append(_to_dict(_unwrap(response, "blockInfo")))
+
+            return main_chain_blocks
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to show main chain with depth {depth}: {e}")
+            return None
+
+    async def health_check(self) -> bool:
+        try:
+            response = await self.stub.status(empty_pb2.Empty())
+            _unwrap(response, "status")
+            return True
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed health check: {e}")
+            return False
+
+    async def get_epoch_info(self) -> Optional[Dict[str, Any]]:
+        url = f"http://{self.node_host}:{self.http_port}/api/epoch"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+
+            return {
+                "current_epoch": data.get("currentEpoch"),
+                "epoch_length": data.get("epochLength"),
+                "quarantine_length": data.get("quarantineLength"),
+                "blocks_until_next_epoch": data.get("blocksUntilNextEpoch"),
+                "last_finalized_block_number": data.get("lastFinalizedBlockNumber"),
+                "block_hash": data.get("blockHash"),
+            }
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Failed to get epoch info: {e}")
+            return None
+
+    async def get_network_consensus(self) -> Optional[Dict[str, Any]]:
+        try:
+            lfb = await self.get_last_finalized_block()
+            bonds_data = await self.get_bonds()
+            active = await self.get_active_validators()
+
+            if lfb is None or bonds_data is None or active is None:
+                return None
+
+            total_bonded = len(bonds_data["bonds"])
+            active_count = len(active)
+            in_quarantine = max(0, total_bonded - active_count)
+
+            # weighted by stake, not by head count: the thresholds below are about voting power
+            total_stake = sum(b["stake"] for b in bonds_data["bonds"])
+            active_stake = sum(v["stake"] for v in active)
+            participation = (active_stake / total_stake) if total_stake else 0.0
+
+            if participation > BFT_SUPERMAJORITY:
+                status = "healthy"
+            elif participation > BFT_MINORITY:
+                status = "degraded"
+            else:
+                status = "critical"
+
+            return {
+                "current_block": lfb["blockNumber"],
+                "total_bonded_validators": total_bonded,
+                "active_validators": active_count,
+                "validators_in_quarantine": in_quarantine,
+                "participation_rate": participation * 100,
+                "status": status,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get network consensus: {e}")
+            return None
