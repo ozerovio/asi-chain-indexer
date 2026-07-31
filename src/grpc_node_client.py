@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import sys
 from pathlib import Path
@@ -57,6 +58,7 @@ class GrpcNodeClient:
         self.node_host = node_host or settings.node_host or "localhost"
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
+        self.timeout = settings.node_timeout
 
         self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
         self.stub = svc.DeployServiceStub(self.channel)
@@ -69,7 +71,7 @@ class GrpcNodeClient:
             query = common.BlocksQueryByHeight(startBlockNumber=start, endBlockNumber=end)
 
             blocks = []
-            async for response in self.stub.getBlocksByHeights(query):
+            async for response in self.stub.getBlocksByHeights(query, timeout=self.timeout):
                 blocks.append(_to_dict(_unwrap(response, "blockInfo")))
 
             return blocks
@@ -80,7 +82,7 @@ class GrpcNodeClient:
 
     async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery())
+            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
             wrapper = _unwrap(response, "blockInfo")
             return _to_dict(wrapper.blockInfo)
 
@@ -90,7 +92,7 @@ class GrpcNodeClient:
 
     async def get_bonds(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery())
+            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
             wrapper = _unwrap(response, "blockInfo")
             return {"bonds": _to_dict(wrapper.blockInfo).get("bonds", [])}
 
@@ -102,7 +104,7 @@ class GrpcNodeClient:
         # activeValidators is PoS contract state, no gRPC RPC exposes it
         url = f"http://{self.node_host}:{self.http_port}/api/validators"
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
                 async with session.get(url) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
@@ -112,14 +114,14 @@ class GrpcNodeClient:
                 for v in data.get("validators", [])
             ]
 
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Failed to get active validators: {e}")
             return None
 
     async def get_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
         try:
             query = common.BlockQuery(hash=block_hash)
-            response = await self.stub.getBlock(query)
+            response = await self.stub.getBlock(query, timeout=self.timeout)
             return _to_dict(_unwrap(response, "blockInfo"))
 
         except grpc.RpcError as e:
@@ -129,10 +131,10 @@ class GrpcNodeClient:
     async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:
         try:
             query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))  # raises ValueError on a non-hex id
-            find_response = await self.stub.findDeploy(query)
+            find_response = await self.stub.findDeploy(query, timeout=self.timeout)
             light_block = _unwrap(find_response, "blockInfo")
 
-            block_response = await self.stub.getBlock(common.BlockQuery(hash=light_block.blockHash))
+            block_response = await self.stub.getBlock(common.BlockQuery(hash=light_block.blockHash), timeout=self.timeout)
             full_block = _unwrap(block_response, "blockInfo")
 
             for deploy in full_block.deploys:
@@ -156,7 +158,7 @@ class GrpcNodeClient:
         try:
             query = common.BlocksQuery(depth=depth)
             main_chain_blocks = []
-            async for response in self.stub.showMainChain(query):
+            async for response in self.stub.showMainChain(query, timeout=self.timeout):
                 main_chain_blocks.append(_to_dict(_unwrap(response, "blockInfo")))
 
             return main_chain_blocks
@@ -167,7 +169,7 @@ class GrpcNodeClient:
 
     async def health_check(self) -> bool:
         try:
-            response = await self.stub.status(empty_pb2.Empty())
+            response = await self.stub.status(empty_pb2.Empty(), timeout=self.timeout)
             _unwrap(response, "status")
             return True
 
@@ -178,7 +180,7 @@ class GrpcNodeClient:
     async def get_epoch_info(self) -> Optional[Dict[str, Any]]:
         url = f"http://{self.node_host}:{self.http_port}/api/epoch"
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
                 async with session.get(url) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
@@ -192,7 +194,7 @@ class GrpcNodeClient:
                 "block_hash": data.get("blockHash"),
             }
 
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"Failed to get epoch info: {e}")
             return None
 
