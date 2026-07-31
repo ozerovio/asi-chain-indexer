@@ -13,6 +13,19 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
+# regenerates the gRPC client from protos/; installed without --user so it never reaches runtime
+RUN pip install --no-cache-dir grpcio-tools==1.83.0
+COPY protos/ /protos/
+RUN mkdir -p /stubs/scalapb && python -m grpc_tools.protoc \
+    -I /protos \
+    --python_out=/stubs --grpc_python_out=/stubs \
+    /protos/DeployServiceV1.proto \
+    /protos/DeployServiceCommon.proto \
+    /protos/CasperMessage.proto \
+    /protos/RhoTypes.proto \
+    /protos/ServiceError.proto \
+    /protos/scalapb/scalapb.proto
+
 
 # ==============================
 # Stage 3: Runtime image
@@ -31,6 +44,7 @@ WORKDIR /app
 COPY --from=python-builder /root/.local /home/indexer/.local
 
 COPY . .
+COPY --from=python-builder /stubs/. src/grpc_stubs/
 
 RUN chown -R indexer:indexer /app /home/indexer/.local
 
