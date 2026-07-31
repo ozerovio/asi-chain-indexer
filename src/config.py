@@ -22,12 +22,6 @@ class Settings(BaseSettings):
         description="HTTP request timeout in seconds"
     )
 
-    # Rust CLI Configuration
-    rust_cli_path: Optional[str] = Field(
-        default=None,
-        description="Path to Rust CLI executable (node_cli)"
-    )
-
     http_port: int = Field(
         default=40453,
         description="HTTP port for status queries"

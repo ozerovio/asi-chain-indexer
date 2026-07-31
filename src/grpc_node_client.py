@@ -1,11 +1,13 @@
 import base64
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiohttp
 import structlog
 
-sys.path.insert(0, "src/grpc_stubs")
+# generated stubs import each other by bare name, so their directory has to be on the path
+sys.path.insert(0, str(Path(__file__).parent / "grpc_stubs"))
 import grpc
 import DeployServiceV1_pb2_grpc as svc
 import DeployServiceCommon_pb2 as common
@@ -50,13 +52,21 @@ def _to_dict(message) -> Dict[str, Any]:
 
 
 class GrpcNodeClient:
-    def __init__(self, node_host: str = None, grpc_port: int = None, http_port: int = None):
+    def __init__(
+        self,
+        node_host: Optional[str] = None,
+        grpc_port: Optional[int] = None,
+        http_port: Optional[int] = None,
+    ):
         self.node_host = node_host or settings.node_host or "localhost"
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
 
         self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
         self.stub = svc.DeployServiceStub(self.channel)
+
+    async def close(self):
+        await self.channel.close()
 
     async def get_blocks_by_height(self, start: int, end: int) -> List[Dict[str, Any]]:
         try:
@@ -122,7 +132,7 @@ class GrpcNodeClient:
 
     async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:
         try:
-            query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))
+            query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))  # raises ValueError on a non-hex id
             find_response = await self.stub.findDeploy(query)
             light_block = _unwrap(find_response, "blockInfo")
 
@@ -142,7 +152,7 @@ class GrpcNodeClient:
             logger.warning(f"Deploy {deploy_id} not found in resolved block {light_block.blockHash}")
             return None
 
-        except grpc.RpcError as e:
+        except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to get deploy info for {deploy_id}: {e}")
             return None
 

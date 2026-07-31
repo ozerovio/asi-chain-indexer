@@ -1,4 +1,4 @@
-"""Enhanced indexer using Rust CLI for comprehensive blockchain synchronization."""
+"""Enhanced indexer using the node gRPC/HTTP API for comprehensive blockchain synchronization."""
 
 import asyncio
 import re
@@ -17,13 +17,13 @@ from src.models import (
     Block, Deployment, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
-from src.rust_cli_client import RustCLIClient
+from src.grpc_node_client import GrpcNodeClient
 
 logger = structlog.get_logger(__name__)
 
 
 class RustBlockIndexer:
-    """Enhanced indexer using Rust CLI for full blockchain data extraction."""
+    """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
 
     # Pattern for extracting ASI transfers from Rholang terms
     TRANSFER_PATTERNS = [
@@ -77,8 +77,8 @@ class RustBlockIndexer:
     async def start(self):
         """Start the enhanced indexer."""
         self.running = True
-        print("🚀 Starting enhanced Rust CLI blockchain indexer", flush=True)
-        logger.info("🚀 Starting enhanced Rust CLI blockchain indexer")
+        print("🚀 Starting enhanced blockchain indexer", flush=True)
+        logger.info("🚀 Starting enhanced blockchain indexer")
 
         # Initialize database
         logger.info("📊 Connecting to database...")
@@ -86,10 +86,10 @@ class RustBlockIndexer:
         await db.create_tables()
         logger.info("✅ Database connected and tables ready")
 
-        # Initialize Rust CLI client
-        logger.info("🔧 Initializing Rust CLI client...")
+        # Initialize gRPC node client
+        logger.info("🔧 Initializing gRPC node client...")
         try:
-            self.client = RustCLIClient()
+            self.client = GrpcNodeClient()
         except Exception as e:
             logger.error(str(e), exc_info=True)
 
@@ -97,7 +97,7 @@ class RustBlockIndexer:
         logger.info("🔍 Checking ASI-Chain node health...")
         if not await self.client.health_check():
             logger.error("❌ Node is not healthy - cannot connect to ASI-Chain node")
-            raise RuntimeError("Cannot connect to node via Rust CLI")
+            raise RuntimeError("Cannot connect to node")
 
         logger.info("✅ ASI-Chain node connection established")
 
@@ -137,7 +137,7 @@ class RustBlockIndexer:
         await db.disconnect()
 
     async def _sync_blocks(self):
-        """Sync blocks using Rust CLI get-blocks-by-height command."""
+        """Sync blocks using the node's getBlocksByHeights RPC."""
         try:
             # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
@@ -175,7 +175,7 @@ class RustBlockIndexer:
             end = min(start + batch_size - 1, latest_block_number)
 
             logger.info(
-                "🔄 Syncing blocks via Rust CLI",
+                "🔄 Syncing blocks",
                 start_block=start,
                 end_block=end,
                 blocks_behind=latest_block_number - last_indexed,
@@ -1012,63 +1012,18 @@ class RustBlockIndexer:
                 except Exception as e:
                     logger.warning(f"Could not get bonds from genesis block: {e}")
 
-            # Step 2: If no bonds in genesis block, try to get from active validators
+            # Step 2: If no bonds in genesis block, ask the node directly
             if not bonds:
-                # Get initial validator bonds from read-only node
-                # Temporarily switch to read-only port
-                # original_port = self.client.http_port
-                # self.client.http_port = 40453  # TODO Read-only node port, old: 40453
-
                 try:
-                    # First try to get the first few blocks to extract full validator keys from proposers
-                    validator_full_keys = {}
-                    for block_num in range(1, min(20, 100)):  # Check first 20 blocks
-                        blocks = await self.client.get_blocks_by_height(block_num, block_num)
-                        if blocks and len(blocks) > 0:
-                            block_info = blocks[0]
-                            if 'proposer' in block_info:
-                                proposer = block_info['proposer']
-                                if proposer and len(proposer) > 100:  # Full key
-                                    # Store mapping of abbreviated to full key
-                                    abbreviated = proposer[:8] + "..." + proposer[-8:]
-                                    validator_full_keys[abbreviated] = proposer
-
-                    # Get bonds (which shows abbreviated keys with stakes)
-                    stdout, _ = await self.client._run_command([
-                        "bonds",
-                        "-H", self.client.node_host,
-                        "--http-port", str(self.client.http_port)
-                    ])
-
-                    # Restore original port
-                    # self.client.http_port = original_port
-
-                    # Parse bonds output to get stakes
-                    if stdout:
-                        lines = stdout.strip().split('\n')
-                        for line in lines:
-                            # Match lines like: 1. 04837a4c...b2df065f (stake: 50000000000000)
-                            match = re.search(r'([0-9a-fA-F]{8}\.\.\.?[0-9a-fA-F]{8})\s*\(stake:\s*(\d+)\)', line)
-                            if match:
-                                abbreviated = match.group(1)
-                                stake = int(match.group(2))
-
-                                # Find the full key from our validator_full_keys mapping
-                                full_key = validator_full_keys.get(abbreviated)
-                                if full_key:
-                                    bonds.append((full_key, stake, stake / 100000000))
-                                    logger.info(f"Found validator bond: {full_key[:20]}... -> {stake / 100000000} ASI")
-                                else:
-                                    # If we couldn't find full key, use abbreviated for now
-                                    # The full key will be discovered when processing blocks
-                                    logger.warning(
-                                        f"Could not find full key for validator: {abbreviated}, will discover from blocks")
-                                    bonds.append((abbreviated, stake, stake / 100000000))
+                    bonds_data = await self.client.get_bonds()
+                    for bond in (bonds_data or {}).get("bonds", []):
+                        validator_key = bond.get("validator")
+                        stake = bond.get("stake", 0)
+                        if validator_key and stake > 0:
+                            bonds.append((validator_key, stake, stake / 100000000))
+                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
                 except Exception as e:
                     logger.error(f"Error getting validator bonds: {e}")
-                # finally:
-                # Restore original port
-                # self.client.http_port = original_port
 
             # For a network-agnostic approach, we can try to detect initial allocations
             # by looking at the first few blocks for large transfers from genesis

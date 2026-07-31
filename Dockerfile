@@ -1,21 +1,5 @@
 # ==============================
-# Stage 1: Fetch Rust CLI binary from GitHub Releases
-# ==============================
-FROM debian:bookworm-slim AS rust-cli
-
-ARG RUST_CLIENT_VERSION=v0.3
-
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /out \
-  && curl -fsSL -o /out/snetrc \
-    "https://github.com/singnet/rust-client/releases/download/${RUST_CLIENT_VERSION}/snetrc-linux-amd64-${RUST_CLIENT_VERSION}" \
-  && chmod +x /out/snetrc
-
-
-# ==============================
-# Stage 2: Build Python dependencies
+# Stage 1: Build Python dependencies
 # ==============================
 FROM python:3.11-slim AS python-builder
 
@@ -46,10 +30,6 @@ WORKDIR /app
 
 COPY --from=python-builder /root/.local /home/indexer/.local
 
-# Copy Rust CLI binary
-COPY --from=rust-cli /out/snetrc /usr/local/bin/snetrc
-RUN chmod +x /usr/local/bin/snetrc
-
 COPY . .
 
 RUN chown -R indexer:indexer /app /home/indexer/.local
@@ -58,7 +38,6 @@ USER indexer
 
 ENV PYTHONPATH=/app
 ENV PATH="/home/indexer/.local/bin:${PATH}"
-ENV RUST_CLI_PATH=/usr/local/bin/snetrc
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 9090
