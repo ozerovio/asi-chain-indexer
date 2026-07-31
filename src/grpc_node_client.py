@@ -18,10 +18,6 @@ from src.config import settings
 
 logger = structlog.get_logger(__name__)
 
-# Casper needs strictly more than 2/3 of the bonded stake to stay safe; below 1/3 it cannot progress
-BFT_SUPERMAJORITY = 2 / 3
-BFT_MINORITY = 1 / 3
-
 
 def _unwrap(response, field_name: str):
     which = response.WhichOneof("message")
@@ -213,14 +209,17 @@ class GrpcNodeClient:
             active_count = len(active)
             in_quarantine = max(0, total_bonded - active_count)
 
-            # weighted by stake, not by head count: the thresholds below are about voting power
+            # stake from bonds_data only: get_bonds/get_active_validators aren't one atomic call
+            active_keys = {v["validator"] for v in active}
             total_stake = sum(b["stake"] for b in bonds_data["bonds"])
-            active_stake = sum(v["stake"] for v in active)
+            active_stake = sum(b["stake"] for b in bonds_data["bonds"] if b["validator"] in active_keys)
             participation = (active_stake / total_stake) if total_stake else 0.0
 
-            if participation > BFT_SUPERMAJORITY:
+            # mirrors the node's own casper.fault-tolerance-threshold (settings.fault_tolerance_threshold)
+            safety_threshold = settings.fault_tolerance_threshold
+            if participation > safety_threshold:
                 status = "healthy"
-            elif participation > BFT_MINORITY:
+            elif participation > (1 - safety_threshold):
                 status = "degraded"
             else:
                 status = "critical"

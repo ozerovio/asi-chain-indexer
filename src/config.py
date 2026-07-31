@@ -37,6 +37,13 @@ class Settings(BaseSettings):
         description="host port for status queries"
     )
 
+    fault_tolerance_threshold: float = Field(
+        default=0.67,
+        description="BFT safety threshold for consensus status, mirrors the node's own "
+                     "casper.fault-tolerance-threshold (defaults.conf); not exposed via any API, "
+                     "so it must be kept in sync with the shard's actual config by hand"
+    )
+
     # Database Configuration
     database_url: str = Field(
         default="postgresql://indexer:indexer_pass@localhost:5432/asichain",
