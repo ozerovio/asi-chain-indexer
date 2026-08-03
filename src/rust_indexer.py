@@ -269,7 +269,6 @@ class RustBlockIndexer:
                 shard_id=block_info.get("shardId"),
                 extra_bytes=block_info.get("extraBytes"),
                 version=block_info.get("version"),
-                deployment_count=len(deployments),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
                 pre_state_hash=block_info.get("preStateHash"),
                 justifications=justifications
@@ -338,35 +337,10 @@ class RustBlockIndexer:
             )
 
     async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict):
-        """Process deployment with enhanced data from get-deploy command (idempotent, no migrations)."""
+        """Process a deployment; deploy_data already has everything from the block response."""
         deploy_id = deploy_data.get("sig")
         if not deploy_id:
             return
-
-        # Try to fetch enhanced deployment info
-        enhanced_info = None
-        try:
-            enhanced_info = await self.client.get_deploy_info(deploy_id)
-            await asyncio.sleep(settings.delay_before_node)  # small delay to avoid overwhelming the node
-        except Exception as e:
-            logger.debug(f"Could not get enhanced deploy info for {deploy_id}: {e}")
-
-        # Merge enhanced info if available
-        if enhanced_info and isinstance(enhanced_info, dict):
-            deploy_info = enhanced_info.get("deployInfo", {})
-            if deploy_info:
-                # Update deploy_data with enhanced info
-                deploy_data.update({
-                    "blockHash": deploy_info.get("blockHash", deploy_data.get("blockHash")),
-                    "sender": deploy_info.get("sender", deploy_data.get("deployer")),
-                    "seqNum": deploy_info.get("seqNum"),
-                    "sig": deploy_info.get("sig", deploy_data.get("sig")),
-                    "sigAlgorithm": deploy_info.get("sigAlgorithm", deploy_data.get("sigAlgorithm")),
-                    "shardId": deploy_info.get("shardId"),
-                    "version": deploy_info.get("version"),
-                    "timestamp": deploy_info.get("timestamp", deploy_data.get("timestamp")),
-                    "status": enhanced_info.get("status", "included")
-                })
 
         # Classify deployment and normalize error flags
         term = deploy_data.get("term", "")
