@@ -360,6 +360,9 @@ class RustBlockIndexer:
             block_hash=block_data.get("blockHash"),
             block_number=block_data.get("blockNumber"),
             deployer=deploy_data.get("deployer", deploy_data.get("sender", "")),
+            deployer_address=convert_to_asi_address(
+                deploy_data.get("deployer", deploy_data.get("sender", "")), deploy_data
+            ),
             term=term,
             timestamp=deploy_data.get("timestamp", block_data.get("timestamp")),
             sig=deploy_data.get("sig"),
@@ -390,6 +393,7 @@ class RustBlockIndexer:
                 "seq_num": dep_insert.excluded.seq_num,
                 "shard_id": dep_insert.excluded.shard_id,
                 "deployer": dep_insert.excluded.deployer,
+                "deployer_address": dep_insert.excluded.deployer_address,
                 "term": dep_insert.excluded.term,
                 "phlo_price": dep_insert.excluded.phlo_price,
                 "phlo_limit": dep_insert.excluded.phlo_limit,
@@ -1045,6 +1049,8 @@ class RustBlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer="0000000000000000000000000000000000000000000000000000000000000000",
+                deployer_address=public_key_to_asi_address(
+                    "0000000000000000000000000000000000000000000000000000000000000000"),
                 term=f"Genesis ASI allocation to {address}: {amount_asi:,.0f} ASI",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
@@ -1084,6 +1090,7 @@ class RustBlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer=validator_pubkey,
+                deployer_address=public_key_to_asi_address(validator_pubkey),
                 term=f"Genesis validator bond: {amount_asi:,.0f} ASI staked",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
