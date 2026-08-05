@@ -26,7 +26,7 @@ create TABLE IF NOT EXISTS blocks
     extra_bytes         TEXT,
     version             INTEGER,
     deployment_count    INTEGER     DEFAULT 0,
-    finalization_status VARCHAR(20) DEFAULT 'finalized',
+    finalization_status VARCHAR(20) NOT NULL,
     bonds_map           JSONB,
     justifications      JSONB,
     fault_tolerance     NUMERIC(5, 4),
